@@ -2,6 +2,9 @@
 
 **A bash script that writes to Sam Altman once a day to report the RAM he missed.**
 
+Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no install needed.
+
+[![Website: ram-altman.lol](https://img.shields.io/badge/website-ram--altman.lol-0f5a43)](https://ram-altman.lol)
 ![Global DRAM allocation: quite terrible](https://img.shields.io/badge/global%20DRAM%20allocation-quite%20terrible-red)
 ![Utilization: maybe 5%](https://img.shields.io/badge/utilization-maybe%205%25-orange)
 ![Emails: 1 per day](https://img.shields.io/badge/emails-1%20per%20day-blue)
@@ -73,6 +76,7 @@ You'll need Linux, bash, and a working `sendmail`, `msmtp` or `mail` command. Yo
 ```bash
 git clone https://github.com/IainKay/ram-altman.git
 cd ram-altman
+chmod +x ram-altman.sh test-ram-altman.sh
 
 ./ram-altman.sh --status    # see the evidence against you
 ./ram-altman.sh --dry-run   # preview an email without sending it
@@ -150,6 +154,9 @@ Briefly. It's then returned to the global pool, which is more than can be said f
 
 **Can I run the tests without emailing anyone?**
 Yes. `./test-ram-altman.sh` uses simulated memory and a fake `sendmail`. No inboxes are harmed.
+
+**Can I see it without installing anything?**
+Yes. [ram-altman.lol](https://ram-altman.lol) cycles through the real emails, with sample figures.
 
 **What should I do with all this RAM?**
 Open another browser tab. You've still got time.
