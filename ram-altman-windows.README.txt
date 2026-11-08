@@ -1,0 +1,83 @@
+RAM-ALTMAN FOR WINDOWS
+======================
+
+Files
+-----
+ram-altman.ps1       Windows-native monitor (PowerShell 5.1 or PowerShell 7+)
+test-ram-altman.ps1  Windows-native regression test suite
+
+No WSL, Bash, Python, or third-party PowerShell module is required. The default
+memory source is the Windows GlobalMemoryStatusEx API. Windows' available
+physical memory includes standby, free and zero-page memory that can immediately
+be reused; this is the closest native equivalent to Linux MemAvailable.
+
+Run
+---
+Open Windows PowerShell in the folder containing the scripts:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ram-altman.ps1 --status
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ram-altman.ps1 --dry-run
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test-ram-altman.ps1
+
+For normal scheduled operation, run ram-altman.ps1 without an argument every
+five minutes using Task Scheduler. The script itself limits email to one
+successful message per local calendar day. It also takes an exclusive lock so
+overlapping scheduled invocations do not send duplicates.
+
+Email configuration
+-------------------
+Windows does not ship with a local sendmail-compatible MTA. The simplest
+standalone option is SMTP; set these environment variables for the account
+that runs the scheduled task:
+
+  RAM_ALTMAN_TO              Recipient address (required)
+  RAM_ALTMAN_FROM            Sender address (required)
+  RAM_ALTMAN_FROM_NAME       Optional sender display name
+  RAM_ALTMAN_SMTP_HOST       SMTP server hostname (required unless sendmail.exe exists)
+  RAM_ALTMAN_SMTP_PORT       SMTP port; default 587
+  RAM_ALTMAN_SMTP_USER       Optional SMTP username
+  RAM_ALTMAN_SMTP_PASSWORD   Optional SMTP password
+  RAM_ALTMAN_SMTP_SSL        true/false; default true (STARTTLS)
+  RAM_ALTMAN_THRESHOLD       Available-memory percentage; default 10
+
+Example (run in PowerShell before testing):
+
+  $env:RAM_ALTMAN_TO = 'recipient@example.com'
+  $env:RAM_ALTMAN_FROM = 'monitor@example.com'
+  $env:RAM_ALTMAN_FROM_NAME = 'RAM monitor'
+  $env:RAM_ALTMAN_SMTP_HOST = 'smtp.example.com'
+  $env:RAM_ALTMAN_SMTP_PORT = '587'
+  $env:RAM_ALTMAN_SMTP_USER = 'monitor@example.com'
+  $env:RAM_ALTMAN_SMTP_PASSWORD = 'your-app-password'
+  $env:RAM_ALTMAN_SMTP_SSL = 'true'
+
+The password is read from an environment variable; avoid putting it directly
+in a shared script file. For Task Scheduler, define the variables in the user
+or machine environment used by the scheduled task. Some providers require an
+app password or do not allow SMTP AUTH. OAuth-only SMTP providers are not
+supported by the built-in .NET SMTP client; use a sendmail-compatible relay or
+an authenticated SMTP relay in that case.
+
+A sendmail-compatible executable can be supplied via RAM_ALTMAN_SENDMAIL. It
+must accept `-t -i` and read a complete RFC-style message from standard input.
+If no such executable is configured, the script uses native .NET SMTP.
+
+State and logs
+--------------
+Default state directory: %LOCALAPPDATA%\ram-altman
+Override with RAM_ALTMAN_STATE_DIR. The directory contains usage.csv,
+last_sent, the message-rotation bags, and the lock file. The CSV is trimmed
+once it exceeds 10 MiB, retaining its header and the latest 50,000 samples.
+
+Porting / compatibility notes
+-----------------------------
+* --status and --dry-run do not require SMTP settings and do not write state.
+* --dry-run uses random message variants without advancing the persistent bags.
+* The threshold comparison is strict: exactly 10% does not trigger at 10%.
+* last_sent is updated only after a successful send, so failures are retried.
+* RAM_ALTMAN_MEMINFO accepts a Linux-style /proc/meminfo fixture. It exists to
+  test the Linux calculation and is not needed for normal Windows use.
+* Windows' Free figure is the free-and-zero page list. Cache is calculated as
+  Available minus Free, representing memory chiefly on the standby/cache lists.
+  If WMI's optional breakdown counter is unavailable, the total and available
+  values remain valid, but Free is displayed as Available and Cache as zero.
