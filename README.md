@@ -31,7 +31,7 @@ So we wrote a script. If your machine has more than 10% of its RAM available, it
 - Sends at most one email per day, because we're hoarders, not animals
 - Rotates 8 subject lines, 10 messages and 6 sign-offs, so the joke gets old at a carefully managed pace
 - Logs every sample to CSV for when the auditors arrive
-- Ships with 14 tests, more than the DRAM market has had sensible outcomes
+- Ships with 26 tests for Linux and macOS, more than the DRAM market has had sensible outcomes
 - Is written in bash, as an Electron version would have solved the problem by using all the RAM
 
 ## A sample of today's correspondence
@@ -57,11 +57,19 @@ The figures are real. They come from your machine. That's the worrying part.
 
 ## What counts as "used"?
 
+The formula for used is:
+
 ```text
-used = MemTotal - MemAvailable
+used = total - available
 ```
 
-`MemAvailable` is the kernel's own estimate of how much memory programs could claim without swapping. Free RAM counts as available. So does cache the kernel can reclaim. tmpfs and shared memory don't, because they can't simply be handed back.
+Each platform supplies total and available memory differently.
+
+On Linux, total memory comes from `MemTotal` in `/proc/meminfo`, and available
+memory comes from `MemAvailable`. `MemAvailable` is the kernel's own estimate of
+how much memory programs could claim without swapping. Free RAM counts as
+available. So does cache the kernel can reclaim. tmpfs and shared memory don't,
+because they can't simply be handed back.
 
 Every sysadmin has spent years explaining that [Linux didn't eat your RAM](https://www.linuxatemyram.com/) and that free RAM is wasted RAM. It took decades for someone important to agree with the second part, and he'd like it shipped to him.
 
@@ -69,9 +77,25 @@ Strictly speaking, the page cache is doing useful work, so counting it as availa
 
 On kernels older than 3.14, which have no `MemAvailable`, the script estimates it from free memory plus reclaimable cache. If you're on one of those, your RAM may be safe. Nobody's coming for that.
 
+On macOS, the script reads installed memory from `sysctl -n hw.memsize` and
+page counts from `vm_stat`, using the page size reported by the system. Available
+memory is an estimate: free + file-backed + purgeable pages,
+capped at installed memory. The Cache line shows file-backed + purgeable memory,
+including speculative pages. Free shows the free-page count printed by `vm_stat`.
+Inactive pages are not added because they overlap other counters and can include
+anonymous memory that requires swapping. Compressed memory is not counted as
+available. This estimate is not Activity Monitor's memory pressure indicator. Apple's [kernel documentation](https://github.com/apple-oss-distributions/xnu/blob/main/doc/vm/memorystatus_notify.md)
+describes the distinction between reclaimable memory and memory pressure.
+
 ## Installation
 
-You'll need Linux, bash, and a working `sendmail`, `msmtp` or `mail` command. Your RAM is assumed.
+You'll need Linux or macOS, Bash (including macOS's built-in Bash 3.2), and a
+configured `sendmail`, `msmtp` or `mail` command for delivery. Status and dry-run
+work without mail setup. Your RAM is assumed.
+
+macOS includes mail commands, but their presence does not mean outbound delivery
+is configured. Configure a working mail transport before enabling the cron job.
+No GNU utilities or Homebrew packages are required by the script.
 
 ```bash
 git clone https://github.com/IainKay/ram-altman.git
@@ -102,7 +126,16 @@ RAM_ALTMAN_FROM_NAME=Your Name
 */5 * * * * /path/to/ram-altman.sh
 ```
 
+On macOS, use an absolute script path accessible to cron and keep the Mac awake
+for scheduled runs; cron does not catch up jobs missed while asleep.
+
 It samples every five minutes and emails at most once a day. If a send fails, it tries again on the next run, because this message matters.
+
+Overlapping runs use `flock` when installed, or an atomic lock directory otherwise
+(including stock macOS). The directory is removed on normal exit and handled
+signals. After a forced kill or power loss, if runs stop logging, make sure no
+instance is still running, then remove the stale lock with
+`rmdir ~/.local/state/ram-altman/lock.d` (adjust for your configured state directory).
 
 | Setting | What it does | Default |
 | --- | --- | --- |
@@ -144,7 +177,7 @@ No.
 The memory accounting is. The correspondence isn't.
 
 **Does it work on macOS?**
-No, it reads `/proc/meminfo`. On the other hand, your RAM is probably soldered down, which makes you the hardest target in the global allocation programme.
+Yes, using the built-in `sysctl` and `vm_stat` commands. It supports Intel and Apple silicon page sizes. Your RAM may be soldered down, but it can still be reported to the global allocation program.
 
 **Why is the threshold 10%?**
 Below that, your machine has suffered enough.
