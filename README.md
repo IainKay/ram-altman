@@ -31,7 +31,8 @@ So we wrote a script. If your machine has more than 10% of its RAM available, it
 - Sends at most one email per day, because we're hoarders, not animals
 - Rotates 8 subject lines, 10 messages and 6 sign-offs, so the joke gets old at a carefully managed pace
 - Logs every sample to CSV for when the auditors arrive
-- Ships with 14 tests, more than the DRAM market has had sensible outcomes
+- Reports a whole Proxmox VE cluster in one email, node by node
+- Ships with 30 tests, more than the DRAM market has had sensible outcomes
 - Is written in bash, as an Electron version would have solved the problem by using all the RAM
 
 ## A sample of today's correspondence
@@ -111,6 +112,31 @@ It samples every five minutes and emails at most once a day. If a send fails, it
 | `RAM_ALTMAN_FROM_NAME` | Your name, or your nom de RAM | Optional |
 | `RAM_ALTMAN_THRESHOLD` | Email when available RAM is above this percentage (whole number) | `10` |
 | `RAM_ALTMAN_STATE_DIR` | Where the log and state files live | `~/.local/state/ram-altman` |
+| `RAM_ALTMAN_SOURCE` | `auto`, `local` (this host only) or `proxmox` (whole cluster) | `auto`: `proxmox` if `pvesh` exists |
+| `RAM_ALTMAN_SHARED_STATE` | Where a cluster records the last send date | `/etc/pve/ram-altman-last-sent` |
+
+## Proxmox clusters
+
+On a Proxmox VE node the script reports the whole cluster rather than the host it's running on. It uses `pvesh`, so it needs root but no API tokens or extra packages. The figures are the ones Proxmox reports, so they match the web UI.
+
+```text
+Total:      96.0 GiB
+Used:       48.0 GiB
+Available:  48.0 GiB (50.0%)
+  node 1           32.0 GiB of 64.0 GiB available (50.0%)
+  node 2           16.0 GiB of 32.0 GiB available (50.0%)
+  node 3           offline, not counted
+```
+
+Add the cron entry to root's crontab on every node. It's still one email a day:
+
+- Only the first online node by name reports, and only while the cluster has quorum. If that node goes down, the next one takes over.
+- The send date is kept on the cluster filesystem, so a failover can't send a second email the same day.
+- The CSV log stays on whichever node is reporting, and holds the cluster totals.
+- Nodes appear as numbers in name order, so your hostnames stay out of the email.
+- Totals cover online nodes only, and count host memory, so guests aren't counted twice.
+
+ZFS hosts will look fuller than they are, because ARC counts as used in Proxmox's figures. Set `RAM_ALTMAN_SOURCE=local` to report a single host from `/proc/meminfo` instead.
 
 ## Audit yourself
 
@@ -130,7 +156,7 @@ One email a day from one person is a joke. Ten thousand of them is a denial-of-s
 
 - **`--dry-run` is the best way to enjoy this.** It costs nothing and all the jokes are there.
 - **This repo doesn't ship with anyone's email address,** and please don't add one.
-- **Use your own real address.** No spoofing, and no running it across your server fleet.
+- **Use your own real address.** No spoofing, and no running it across your server fleet, unless it's one Proxmox cluster sending its one email.
 - **If anyone asks you to stop, stop.** The footer of every email promises this, so keep the promise.
 
 You can also point it at someone who will enjoy it, like the friend who has been waiting for DDR5 prices to come down.
