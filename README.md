@@ -82,6 +82,16 @@ chmod +x ram-altman.sh test-ram-altman.sh
 ./ram-altman.sh --dry-run   # preview an email without sending it
 ```
 
+Or run it straight from the repository with [Nix](https://nixos.org/) (flakes enabled):
+
+```bash
+nix run github:IainKay/ram-altman -- --status
+nix run github:IainKay/ram-altman -- --dry-run
+```
+
+The flake supplies `bash`, `awk`, `coreutils` and `util-linux`. You still need a
+`sendmail`, `msmtp` or `mail` command on your `PATH` to send for real.
+
 Example output, from a simulated machine that has confessed to everything:
 
 ```text
