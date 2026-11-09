@@ -11,7 +11,7 @@
 # Cron (every 5 minutes):
 #   */5 * * * * /path/to/ram-altman.sh
 #
-# How "used" is worked out:
+# How "used" is worked out on Linux:
 #   used = MemTotal - MemAvailable
 #
 #   MemAvailable is the kernel's own estimate of how much memory can be handed
@@ -45,8 +45,8 @@ die() {
 }
 
 # Sets: total_kb, available_kb, used_kb, free_kb, cache_kb, available_pct
-read_memory() {
-    [[ -r "$MEMINFO" ]] || die "cannot read $MEMINFO (this script needs Linux)"
+read_memory_linux() {
+    [[ -r "$MEMINFO" ]] || die "cannot read $MEMINFO"
 
     read -r total_kb available_kb free_kb cache_kb < <(
         awk '
@@ -73,6 +73,56 @@ read_memory() {
     used_kb=$(( total_kb - available_kb ))
     available_pct=$(awk -v a="$available_kb" -v t="$total_kb" \
         'BEGIN { printf "%.1f", a * 100 / t }')
+}
+
+read_memory_macos() {
+    local page_size total_bytes
+    page_size=$(vm_stat | awk '/page size of/ { print $8; exit }')
+    total_bytes=$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem)
+
+    [[ "$page_size" =~ ^[0-9]+$ ]] ||
+        die "could not determine macOS virtual memory page size"
+    [[ "$total_bytes" =~ ^[0-9]+$ ]] ||
+        die "could not determine macOS physical memory size"
+
+    read -r free_pages available_pages cache_pages < <(
+        vm_stat | awk -v page_size="$page_size" '
+            function pages(value) {
+                gsub("\\.", "", value)
+                return value + 0
+            }
+            /^Pages free:/                 { free = pages($3) }
+            /^Pages inactive:/             { inactive = pages($3) }
+            /^Pages speculative:/          { speculative = pages($3) }
+            /^Pages purgeable:/            { purgeable = pages($3) }
+            /^File-backed pages:/          { file_backed = pages($3) }
+            END {
+                available = free + inactive + speculative + purgeable + file_backed
+                cache = inactive + speculative + purgeable + file_backed
+                printf "%.0f %.0f %.0f\n", free * page_size / 1024,
+                    available * page_size / 1024, cache * page_size / 1024
+            }
+        '
+    )
+
+    total_kb=$(( total_bytes / 1024 ))
+    (( available_pages > total_kb )) && available_pages=$total_kb
+    available_kb=$available_pages
+    free_kb=$free_pages
+    cache_kb=$cache_pages
+    (( total_kb > 0 )) || die "could not determine total physical memory"
+
+    used_kb=$(( total_kb - available_kb ))
+    available_pct=$(awk -v a="$available_kb" -v t="$total_kb" \
+        'BEGIN { printf "%.1f", a * 100 / t }')
+}
+
+read_memory() {
+    case "$(uname -s)" in
+        Linux) read_memory_linux ;;
+        Darwin) read_memory_macos ;;
+        *) die "unsupported operating system: $(uname -s)" ;;
+    esac
 }
 
 to_gib() {
@@ -117,7 +167,19 @@ pick() {
 
     bag="$STATE_DIR/bag_$name"
     if [[ ! -s "$bag" ]]; then
-        seq 0 $(( count - 1 )) | shuf > "$bag"
+        seq 0 $(( count - 1 )) | awk '
+            BEGIN { srand() }
+            { values[NR] = $0 }
+            END {
+                for (i = NR; i > 1; i--) {
+                    j = int(rand() * i) + 1
+                    tmp = values[i]
+                    values[i] = values[j]
+                    values[j] = tmp
+                }
+                for (i = 1; i <= NR; i++) print values[i]
+            }
+        ' > "$bag"
         # Stop the last pick of the old round opening the new one.
         last=$(cat "$bag.last" 2>/dev/null || true)
         if [[ "$(head -n 1 "$bag")" == "$last" ]] && (( count > 1 )); then
@@ -203,7 +265,7 @@ render_message() {
     printf 'From: %s\n' "$from"
     printf 'To: %s\n' "$RECIPIENT"
     printf 'Subject: %s\n' "$email_subject"
-    printf 'Date: %s\n' "$(date -R)"
+    printf 'Date: %s\n' "$(date '+%a, %d %b %Y %H:%M:%S %z')"
     printf 'MIME-Version: 1.0\n'
     printf 'Content-Type: text/plain; charset=UTF-8\n'
     printf 'Auto-Submitted: auto-generated\n'
@@ -265,6 +327,10 @@ main() {
     if command -v flock > /dev/null; then
         exec 9> "$STATE_DIR/lock"
         flock -n 9 || exit 0
+    else
+        lock_dir="$STATE_DIR/lock.d"
+        mkdir "$lock_dir" 2>/dev/null || exit 0
+        trap 'rmdir "$lock_dir"' EXIT
     fi
 
     read_memory
