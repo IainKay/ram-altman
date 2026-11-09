@@ -23,9 +23,9 @@
 set -euo pipefail
 
 # ----- Settings: fill these in -----------------------------------------------
-RECIPIENT="${RAM_ALTMAN_TO:-}"             # Who receives the email
-SENDER="${RAM_ALTMAN_FROM:-}"              # A real address you can send from
-SENDER_NAME="${RAM_ALTMAN_FROM_NAME:-}"    # Display name, optional
+RECIPIENT="${RAM_ALTMAN_TO:-}"              # Who receives the email
+SENDER="${RAM_ALTMAN_FROM:-}"               # A real address you can send from
+SENDER_NAME="${RAM_ALTMAN_FROM_NAME:-}"     # Display name, optional
 THRESHOLD_PCT="${RAM_ALTMAN_THRESHOLD:-10}" # Email when available is above this
 # -----------------------------------------------------------------------------
 
@@ -33,8 +33,10 @@ MEMINFO="${RAM_ALTMAN_MEMINFO:-/proc/meminfo}"
 STATE_DIR="${RAM_ALTMAN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ram-altman}"
 USAGE_LOG="$STATE_DIR/usage.csv"
 LAST_SENT_FILE="$STATE_DIR/last_sent"
-MAX_LOG_BYTES=$((10 * 1024 * 1024))   # Trim the log once it passes 10 MiB
+MAX_LOG_BYTES=$((10 * 1024 * 1024)) # Trim the log once it passes 10 MiB
 LOG_LINES_TO_KEEP=50000
+email_subject=''
+email_body=''
 
 # cron's PATH often leaves out the directories sendmail lives in.
 export PATH="$PATH:/usr/sbin:/sbin"
@@ -48,7 +50,7 @@ die() {
 read_memory() {
     [[ -r "$MEMINFO" ]] || die "cannot read $MEMINFO (this script needs Linux)"
 
-    read -r total_kb available_kb free_kb cache_kb < <(
+    read -r total_kb available_kb free_kb cache_kb used_kb available_pct < <(
         awk '
             /^MemTotal:/      { total = $2 }
             /^MemFree:/       { free = $2 }
@@ -63,16 +65,14 @@ read_memory() {
                 # Kernels older than 3.14 have no MemAvailable, so estimate it.
                 if (!has_available) available = free + cache
                 if (available > total) available = total
-                print total + 0, available + 0, free + 0, cache + 0
+                pct = total > 0 ? available * 100 / total : 0
+                printf "%.0f %.0f %.0f %.0f %.0f %.1f\n",
+                    total, available, free, cache, total - available, pct
             }
         ' "$MEMINFO"
     )
 
-    (( total_kb > 0 )) || die "could not find MemTotal in $MEMINFO"
-
-    used_kb=$(( total_kb - available_kb ))
-    available_pct=$(awk -v a="$available_kb" -v t="$total_kb" \
-        'BEGIN { printf "%.1f", a * 100 / t }')
+    [[ "$total_kb" -gt 0 ]] || die "could not find MemTotal in $MEMINFO"
 }
 
 to_gib() {
@@ -80,7 +80,9 @@ to_gib() {
 }
 
 is_over_threshold() {
-    (( available_kb * 100 > THRESHOLD_PCT * total_kb ))
+    [[ "$THRESHOLD_PCT" =~ ^[0-9]+$ ]] || die "RAM_ALTMAN_THRESHOLD must be a non-negative integer"
+    awk -v a="$available_kb" -v t="$total_kb" -v threshold="$THRESHOLD_PCT" \
+        'BEGIN { exit !(a * 100 > threshold * t) }'
 }
 
 print_status() {
@@ -92,12 +94,15 @@ print_status() {
 }
 
 log_sample() {
+    local log_bytes
+
     [[ -f "$USAGE_LOG" ]] ||
         echo 'timestamp,total_kb,used_kb,available_kb,available_pct' > "$USAGE_LOG"
     printf '%s,%s,%s,%s,%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
         "$total_kb" "$used_kb" "$available_kb" "$available_pct" >> "$USAGE_LOG"
 
-    if (( $(wc -c < "$USAGE_LOG") > MAX_LOG_BYTES )); then
+    log_bytes=$(wc -c < "$USAGE_LOG")
+    if ((log_bytes > MAX_LOG_BYTES)); then
         {
             head -n 1 "$USAGE_LOG"
             tail -n "$LOG_LINES_TO_KEEP" "$USAGE_LOG"
@@ -111,17 +116,20 @@ log_sample() {
 pick() {
     local name=$1 count=$2 bag last next
     if [[ -n "${DRY_RUN:-}" ]]; then
-        echo $(( RANDOM % count ))
+        echo $((RANDOM % count))
         return
     fi
 
     bag="$STATE_DIR/bag_$name"
     if [[ ! -s "$bag" ]]; then
-        seq 0 $(( count - 1 )) | shuf > "$bag"
+        seq 0 $((count - 1)) | shuf > "$bag"
         # Stop the last pick of the old round opening the new one.
-        last=$(cat "$bag.last" 2>/dev/null || true)
-        if [[ "$(head -n 1 "$bag")" == "$last" ]] && (( count > 1 )); then
-            { tail -n +2 "$bag"; head -n 1 "$bag"; } > "$bag.tmp"
+        last=$(cat "$bag.last" 2> /dev/null || true)
+        if [[ "$(head -n 1 "$bag")" == "$last" ]] && ((count > 1)); then
+            {
+                tail -n +2 "$bag"
+                head -n 1 "$bag"
+            } > "$bag.tmp"
             mv "$bag.tmp" "$bag"
         fi
     fi
@@ -132,7 +140,7 @@ pick() {
     echo "$next" > "$bag.last"
 
     # Covers the template lists being shortened after the bag was dealt.
-    (( next < count )) || next=$(( RANDOM % count ))
+    ((next < count)) || next=$((RANDOM % count))
     echo "$next"
 }
 
@@ -231,7 +239,7 @@ main() {
             exit 0
             ;;
         --dry-run)
-            DRY_RUN=1
+            local DRY_RUN=1
             read_memory
             print_status
             if ! is_over_threshold; then
@@ -245,7 +253,7 @@ main() {
             render_message
             exit 0
             ;;
-        -h|--help)
+        -h | --help)
             sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
@@ -274,7 +282,7 @@ main() {
 
     local today last_sent
     today=$(date +%F)
-    last_sent=$(cat "$LAST_SENT_FILE" 2>/dev/null || true)
+    last_sent=$(cat "$LAST_SENT_FILE" 2> /dev/null || true)
     [[ "$last_sent" != "$today" ]] || exit 0
 
     compose_email
