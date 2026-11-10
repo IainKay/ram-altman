@@ -30,6 +30,7 @@ THRESHOLD_PCT="${RAM_ALTMAN_THRESHOLD:-10}" # Email when available is above this
 # -----------------------------------------------------------------------------
 
 MEMINFO="${RAM_ALTMAN_MEMINFO:-/proc/meminfo}"
+DRM_DIR="${RAM_ALTMAN_DRM_DIR:-/sys/class/drm}"
 STATE_DIR="${RAM_ALTMAN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ram-altman}"
 USAGE_LOG="$STATE_DIR/usage.csv"
 LAST_SENT_FILE="$STATE_DIR/last_sent"
@@ -79,16 +80,165 @@ to_gib() {
     awk -v kb="$1" 'BEGIN { printf "%.1f GiB", kb / 1048576 }'
 }
 
+# Sysfs memory counters are bytes. A missing, unreadable or invalid value is
+# different from the valid value zero.
+gpu_counter() {
+    local value=''
+    if { IFS= read -r value < "$1" || [[ -n "$value" ]]; } 2>/dev/null &&
+        [[ "$value" =~ ^[0-9]+$ ]] && (( ${#value} <= 20 )); then
+        printf '%s' "$value"
+    else
+        printf 'unavailable'
+    fi
+}
+
+# nvidia-smi uses an eight-digit domain; DRM's PCI_SLOT_NAME uses four.
+gpu_pci_slot() {
+    local slot=${1,,} domain
+    [[ "$slot" =~ ^([0-9a-f]{4}|[0-9a-f]{8}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$ ]] || return 1
+    domain=${BASH_REMATCH[1]}
+    if (( ${#domain} == 8 )); then
+        [[ ${domain:0:4} == 0000 ]] || return 1
+        domain=${domain:4}
+    fi
+    printf '%s:%s:%s.%s' "$domain" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+}
+
+gpu_format() {
+    if [[ "$1" == unavailable ]]; then
+        printf 'unavailable'
+    else
+        awk -v value="$1" -v bytes_per_unit="$2" \
+            'BEGIN { printf "%.1f GiB", value * bytes_per_unit / 1073741824 }'
+    fi
+}
+
+gpu_unused() {
+    if [[ "$1" == unavailable || "$3" == unavailable ]]; then
+        printf 'unavailable'
+    else
+        awk -v total="$1" -v total_unit="$2" -v used="$3" -v used_unit="$4" \
+            'BEGIN {
+                unused = total * total_unit - used * used_unit
+                if (unused < 0) unused = 0
+                printf "%.1f GiB", unused / 1073741824
+            }'
+    fi
+}
+
+gpu_snapshot() {
+    local card name key value slot driver memory_type found=0 path
+    local rows='' line bus total used vram_total vram_used pci total_unit used_unit
+    local row_pattern='^[[:space:]]*([[:xdigit:]]{4,8}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[0-7])[[:space:]]*,[[:space:]]*([^,]+),[[:space:]]*([^,]+),[[:space:]]*([^,]+)[[:space:]]*$'
+    local -a nvidia_slots=()
+    local -A nvidia_names=() nvidia_total=() nvidia_used=() matched=()
+
+    # NVIDIA's sysfs interface does not expose these counters. Query it only
+    # when available and use PCI identity to merge it with DRM cards.
+    if command -v nvidia-smi > /dev/null &&
+        rows=$(nvidia-smi --query-gpu=pci.bus_id,name,memory.total,memory.used \
+            --format=csv,noheader,nounits 2>/dev/null); then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ $row_pattern ]] || continue
+            bus=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]}
+            total=${BASH_REMATCH[3]} used=${BASH_REMATCH[4]}
+            total=${total%"${total##*[![:space:]]}"}
+            used=${used%"${used##*[![:space:]]}"}
+            [[ "$total" =~ ^[0-9]+$ && ${#total} -le 20 ]] || total=unavailable
+            [[ "$used" =~ ^[0-9]+$ && ${#used} -le 20 ]] || used=unavailable
+            bus=$(gpu_pci_slot "$bus") || continue
+            [[ -z ${nvidia_total[$bus]+present} ]] || continue
+            nvidia_slots+=("$bus")
+            nvidia_names[$bus]=$name
+            nvidia_total[$bus]=$total
+            nvidia_used[$bus]=$used
+        done <<< "$rows"
+    fi
+
+    printf 'GPU memory:\n'
+    for card in "$DRM_DIR"/card[0-9]*; do
+        name=${card##*/}
+        [[ "$name" =~ ^card[0-9]+$ && -d "$card/device" ]] || continue
+        found=1
+        slot='' driver=''
+        {
+            while IFS='=' read -r key value; do
+                case "$key" in
+                    PCI_SLOT_NAME) slot=$value ;;
+                    DRIVER) driver=$value ;;
+                esac
+            done < "$card/device/uevent"
+        } 2>/dev/null || true
+        if [[ -z "$slot" ]]; then
+            path=$(readlink -f "$card/device" 2>/dev/null) || path=''
+            pci=${path##*/}
+            slot=$(gpu_pci_slot "$pci") || slot=''
+        fi
+        if [[ -z "$driver" ]]; then
+            path=$(readlink "$card/device/driver" 2>/dev/null) || path=''
+            driver=${path##*/}
+        fi
+
+        vram_total=$(gpu_counter "$card/device/mem_info_vram_total")
+        vram_used=$(gpu_counter "$card/device/mem_info_vram_used")
+        total_unit=1 used_unit=1
+        bus=$(gpu_pci_slot "$slot") || bus=''
+        if [[ -n "$bus" && -n ${nvidia_total[$bus]+present} ]]; then
+            matched[$bus]=1
+            if [[ "$vram_total" == unavailable ]]; then
+                vram_total=${nvidia_total[$bus]}
+                total_unit=1048576
+            fi
+            if [[ "$vram_used" == unavailable ]]; then
+                vram_used=${nvidia_used[$bus]}
+                used_unit=1048576
+            fi
+        fi
+        printf '  GPU %s' "$name"
+        [[ -z "$slot" ]] || printf ' (PCI %s)' "$slot"
+        [[ -z "$driver" ]] || printf ' (driver %s)' "$driver"
+        printf ':\n'
+        memory_type='unknown (VRAM may be dedicated or reserved system DRAM)'
+        if [[ -e "$card/device/uma/carveout" || -e "$card/device/uma/carveout_options" ]]; then
+            memory_type='unified (reserved system DRAM)'
+        fi
+        printf '    Memory type: %s\n' "$memory_type"
+        printf '    VRAM total: %s\n' "$(gpu_format "$vram_total" "$total_unit")"
+        printf '    VRAM used: %s\n' "$(gpu_format "$vram_used" "$used_unit")"
+        printf '    Unused VRAM: %s\n' "$(gpu_unused "$vram_total" "$total_unit" "$vram_used" "$used_unit")"
+        printf '    Shared RAM limit (GTT): %s\n' "$(gpu_format "$(gpu_counter "$card/device/mem_info_gtt_total")" 1)"
+        printf '    Shared RAM used (GTT): %s\n' "$(gpu_format "$(gpu_counter "$card/device/mem_info_gtt_used")" 1)"
+        printf '    GTT allocations borrow system RAM and overlap system RAM usage.\n'
+    done
+    for bus in "${nvidia_slots[@]}"; do
+        [[ -z ${matched[$bus]+present} ]] || continue
+        found=1
+        printf '  GPU %s (PCI %s, nvidia-smi):\n' "${nvidia_names[$bus]}" "$bus"
+        printf '    Memory type: unknown (VRAM may be dedicated or reserved system DRAM)\n'
+        printf '    VRAM total: %s\n' "$(gpu_format "${nvidia_total[$bus]}" 1048576)"
+        printf '    VRAM used: %s\n' "$(gpu_format "${nvidia_used[$bus]}" 1048576)"
+        printf '    Unused VRAM: %s\n' "$(gpu_unused "${nvidia_total[$bus]}" 1048576 "${nvidia_used[$bus]}" 1048576)"
+        printf '    Shared RAM limit (GTT): unavailable\n'
+        printf '    Shared RAM used (GTT): unavailable\n'
+        printf '    GTT allocations borrow system RAM and overlap system RAM usage.\n'
+    done
+    if (( ! found )); then
+        printf '  GPU memory counters unavailable (no DRM card devices found).\n'
+    fi
+}
+
 is_over_threshold() {
     (( available_kb * 100 > THRESHOLD_PCT * total_kb ))
 }
 
 print_status() {
+    printf 'System RAM (DRAM, OS-usable):\n'
     printf 'Total:      %s\n' "$(to_gib "$total_kb")"
     printf 'Used:       %s\n' "$(to_gib "$used_kb")"
-    printf 'Available:  %s (%s%%)\n' "$(to_gib "$available_kb")" "$available_pct"
+    printf 'Unused RAM: %s (%s%%)\n' "$(to_gib "$available_kb")" "$available_pct"
     printf '  Free:     %s\n' "$(to_gib "$free_kb")"
     printf '  Cache:    %s\n' "$(to_gib "$cache_kb")"
+    printf '%s\n' "$gpu_report"
 }
 
 log_sample() {
@@ -137,10 +287,25 @@ pick() {
 }
 
 compose_email() {
-    local total available pct
+    local total available pct line vram_value vram_values='' vram_clause=''
     total=$(to_gib "$total_kb")
     available=$(to_gib "$available_kb")
     pct=$available_pct
+
+    while IFS= read -r line; do
+        case "$line" in
+            '    Unused VRAM: '*' GiB')
+                vram_value=${line#'    Unused VRAM: '}
+                if [[ -n "$vram_values" ]]; then
+                    vram_values+=" + "
+                fi
+                vram_values+=$vram_value
+                ;;
+        esac
+    done <<< "$gpu_report"
+    if [[ -n "$vram_values" ]]; then
+        vram_clause=" and $vram_values of unused VRAM"
+    fi
 
     local subjects=(
         "Good news: we found some RAM"
@@ -154,20 +319,20 @@ compose_email() {
     )
 
     local bodies=(
-        "I'm writing to report that you appear to have missed some. This PC has $total of RAM and $available of it ($pct%) is currently available. I assume this is an oversight."
-        "A routine inspection of my PC found $available of unclaimed RAM out of $total. That's $pct% of the machine doing absolutely nothing. I thought you'd want to know before someone tries to train something on it."
+        "I'm writing to report that you appear to have missed some. This PC has $total of RAM, with $available of it ($pct%) currently available${vram_clause}. I assume this is an oversight."
+        "A routine inspection of my PC found $available of unclaimed RAM out of $total${vram_clause}. That's $pct% of the machine's RAM doing absolutely nothing. I thought you'd want to know before someone tries to train something on it."
         "Daily status report:
 
   Total RAM:     $total
-  Available:     $available ($pct%)
+  Available:     $available ($pct%)${vram_clause}
   Threat level:  someone at OpenAI might notice"
-        "Even with every browser tab I own open, $available of my $total of RAM is still available. I'm as surprised as you are."
-        "Please don't be alarmed, but there is $available of RAM on my desk that isn't in a data centre. That's $pct% of what's installed here, and as far as I can tell it has no plans today."
-        "Before you ask: yes, I counted the page cache as available. The kernel gives it back the moment anyone asks, which leaves $available of $total up for grabs."
-        "Today's forecast for my PC: clear skies, light workloads and $pct% available memory. Expect $available of the installed $total to stay idle through the evening."
-        "I hear RAM is hard to come by these days, so it feels a bit rude to be sitting on $available of it. Total installed: $total. It's not for sale, I just like knowing it's there."
-        "I have a confession. I have $available of RAM that I'm not using, which is $pct% of the $total in this PC. I've told nobody but you and a cron job."
-        "If $available of RAM sits idle in a PC and nobody allocates it, does it still count as capacity? Asking on behalf of the $pct% of my memory with nothing to do."
+        "Even with every browser tab I own open, I still have $available of my $total of RAM available${vram_clause}. I'm as surprised as you are."
+        "Please don't be alarmed, but I have $available of RAM${vram_clause} on my desk that isn't in a data centre. That RAM is $pct% of the OS-usable system RAM here, and as far as I can tell it has no plans today."
+        "Before you ask: yes, I counted the page cache as available. The kernel gives it back the moment anyone asks, which leaves $available of $total of RAM${vram_clause} up for grabs."
+        "Today's forecast for my PC: clear skies, light workloads and $pct% available system RAM. Expect $available of the OS-usable $total of RAM${vram_clause} to stay idle through the evening."
+        "I hear RAM is hard to come by these days, so it feels a bit rude to be sitting on $available of it${vram_clause}. OS-usable RAM total: $total. It's not for sale, I just like knowing it's there."
+        "I have a confession. I have $available of RAM${vram_clause} that I'm not using. That RAM is $pct% of the $total of system RAM in this PC. I've told nobody but you and a cron job."
+        "If $available of RAM${vram_clause} can sit idle in a PC and nobody allocates any of it, does it still count as capacity? Asking on behalf of the $pct% of my system RAM with nothing to do."
     )
 
     local signoffs=(
@@ -227,12 +392,14 @@ main() {
     case "${1:-}" in
         --status)
             read_memory
+            gpu_report=$(gpu_snapshot)
             print_status
             exit 0
             ;;
         --dry-run)
             DRY_RUN=1
             read_memory
+            gpu_report=$(gpu_snapshot)
             print_status
             if ! is_over_threshold; then
                 echo "No email: available RAM is not above ${THRESHOLD_PCT}%."
@@ -268,6 +435,7 @@ main() {
     fi
 
     read_memory
+    gpu_report=$(gpu_snapshot)
     log_sample
 
     is_over_threshold || exit 0
