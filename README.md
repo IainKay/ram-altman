@@ -1,6 +1,6 @@
 # Ram-Altman
 
-**A bash script that writes to Sam Altman once a day to report the RAM he missed.**
+**A Whitespace program that writes to Sam Altman once a day to report the RAM he missed.**
 
 Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no install needed.
 
@@ -8,7 +8,7 @@ Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no insta
 ![Global DRAM allocation: quite terrible](https://img.shields.io/badge/global%20DRAM%20allocation-quite%20terrible-red)
 ![Utilization: maybe 5%](https://img.shields.io/badge/utilization-maybe%205%25-orange)
 ![Emails: 1 per day](https://img.shields.io/badge/emails-1%20per%20day-blue)
-![Written in Bash, not Electron](https://img.shields.io/badge/written%20in-bash%2C%20not%20electron-brightgreen)
+![Written in Whitespace, not Electron](https://img.shields.io/badge/written%20in-whitespace%2C%20not%20electron-brightgreen)
 
 There is RAM in your computer. Right now. Just sitting there, in a *personal* computer, being personal.
 
@@ -31,8 +31,8 @@ So we wrote a script. If your machine has more than 10% of its RAM available, it
 - Sends at most one email per day, because we're hoarders, not animals
 - Rotates 8 subject lines, 10 messages and 6 sign-offs, so the joke gets old at a carefully managed pace
 - Logs every sample to CSV for when the auditors arrive
-- Ships with 14 tests, more than the DRAM market has had sensible outcomes
-- Is written in bash, as an Electron version would have solved the problem by using all the RAM
+- Ships with 16 tests, more than the DRAM market has had sensible outcomes
+- Is written in [Whitespace](https://en.wikipedia.org/wiki/Whitespace_(programming_language)), so the source code takes up no visible space at all. An Electron version would have solved the problem by using all the RAM
 
 ## A sample of today's correspondence
 
@@ -71,7 +71,7 @@ On kernels older than 3.14, which have no `MemAvailable`, the script estimates i
 
 ## Installation
 
-You'll need Linux, bash, and a working `sendmail`, `msmtp` or `mail` command. Your RAM is assumed.
+You'll need Linux, bash, awk, and a working `sendmail`, `msmtp` or `mail` command. Your RAM is assumed.
 
 ```bash
 git clone https://github.com/IainKay/ram-altman.git
@@ -111,6 +111,21 @@ It samples every five minutes and emails at most once a day. If a send fails, it
 | `RAM_ALTMAN_FROM_NAME` | Your name, or your nom de RAM | Optional |
 | `RAM_ALTMAN_THRESHOLD` | Email when available RAM is above this percentage (whole number) | `10` |
 | `RAM_ALTMAN_STATE_DIR` | Where the log and state files live | `~/.local/state/ram-altman` |
+| `RAM_ALTMAN_INTERPRETER` | Your own Whitespace interpreter, run as `<it> ram-altman.ws` | the bundled `ws/interpret.awk` |
+
+## Why is it written in Whitespace?
+
+Because a program that complains about unused capacity should be made of unused space.
+
+[`ram-altman.ws`](ram-altman.ws) is the whole program: 40 KB of spaces, tabs and newlines, and not one visible character. Open it in an editor and you'll see an empty file, which is how most people imagine their spare RAM. It reads `/proc/meminfo`, works out what's available, decides whether an email is due, deals the templates and writes the email.
+
+Whitespace can read from stdin and write to stdout, and that's all it can do. It has no files, no clock, no random numbers and no way of sending email, which makes it roughly as useful as idle DRAM. So `ram-altman.sh` is now a small bash shim that does those chores, hands everything to the Whitespace program and carries out what it says.
+
+- [`ram-altman.wsa`](ram-altman.wsa) is the readable source: Whitespace assembly with comments, which also lists exactly what goes in and what comes back.
+- [`ws/assemble.awk`](ws/assemble.awk) turns it back into Whitespace: `awk -f ws/assemble.awk ram-altman.wsa > ram-altman.ws`
+- [`ws/interpret.awk`](ws/interpret.awk) is a small Whitespace interpreter, so you don't need to install one. Any standard interpreter works too; set `RAM_ALTMAN_INTERPRETER` to use it.
+
+The tests check that `ram-altman.ws` is up to date with its source, and that it still has nothing visible in it.
 
 ## Audit yourself
 
