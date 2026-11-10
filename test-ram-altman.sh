@@ -24,8 +24,8 @@ check() {
     if [[ "$2" == "$3" ]]; then pass=$((pass+1)); echo "ok    $1"
     else fail=$((fail+1)); echo "FAIL  $1 (expected '$3', got '$2')"; fi
 }
-sent() { grep -c '^=====END=====$' "$work/outbox" 2>/dev/null || true; }
-mem() { # total free available buffers cached slab shmem
+sent() { if [[ -f "$work/outbox" ]]; then grep -c '^=====END=====$' "$work/outbox" || true; else echo 0; fi; }
+mem() { # total free available buffers cached slab shmem [swap total] [swap free]
     cat > "$work/meminfo" <<EOF
 MemTotal:       $1 kB
 MemFree:        $2 kB
@@ -35,6 +35,8 @@ Cached:         $5 kB
 SwapCached:     999999 kB
 SReclaimable:   $6 kB
 Shmem:          $7 kB
+SwapTotal:      ${8:-0} kB
+SwapFree:       ${9:-0} kB
 EOF
 }
 
@@ -78,6 +80,52 @@ awk 'BEGIN{RS="=====END=====\n"} NF{n=split($0,l,"\n"); for(i=1;i<=n;i++) if(l[i
     "$work/outbox" > "$work/bodies"
 check "all opening lines used" "$(head -n 10 "$work/bodies" | sort -u | wc -l)" 10
 check "no back-to-back repeat" "$(uniq -d "$work/bodies" | wc -l)" 0
+
+# Memory crisis: below 1% available AND over 10 GiB of swap in use.
+# Use a 32,000,000 kB physical memory fixture; 20 GiB of the 30 GiB swap is used.
+rm -f "$work/outbox"
+echo 2000-01-01 > "$work/state/last_sent"
+mem 32000000 0 0 0 0 0 0 31457280 10485760
+status=$("$script" --status)
+check "status includes 20 GiB swap use" "$(grep '^Swap used:' <<<"$status" | awk '{print $3, $4}')" "20.0 GiB"
+preview=$("$script" --dry-run)
+check "crisis dry run creates report" "$(grep -c '^Incident report:$' <<<"$preview")" 1
+check "crisis dry run displays swap use" "$(grep -c '^  Swap used:      20.0 GiB / 30.0 GiB$' <<<"$preview")" 1
+check "crisis dry run does not send" "$(sent)" 0
+check "crisis dry run does not alter daily stamp" "$(cat "$work/state/last_sent")" 2000-01-01
+"$script"
+check "crisis email is sent" "$(sent)" 1
+check "crisis email has a distinct subject" "$(grep -c '^Subject:.*\(RAM has fallen\|Memory humanitarian crisis\|Department of Missing RAM\|no RAM left\|All available memory\)' "$work/outbox")" 1
+"$script"
+check "crisis shares once-per-day limit" "$(sent)" 1
+
+# Strict boundaries: exactly 1% RAM, exactly 10 GiB swap, or no swap are not crises.
+echo 2000-01-01 > "$work/state/last_sent"
+mem 32000000 0 320000 0 0 0 0 31457280 10485760
+"$script"; check "exactly 1% available: no crisis" "$(sent)" 1
+mem 32000000 0 0 0 0 0 0 31457280 20971520
+"$script"; check "exactly 10 GiB swap used: no crisis" "$(sent)" 1
+mem 32000000 0 0 0 0 0 0 0 0
+"$script"; check "no swap installed: no crisis" "$(sent)" 1
+mem 32000000 0 400000 0 0 0 0 31457280 10485760
+"$script"; check "over 1% available: no crisis" "$(sent)" 1
+
+# With plenty of RAM, use the original report even if swap happens to be full.
+mem 32000000 0 4000000 0 0 0 0 31457280 10485760
+"$script"; check "normal reports stay available" "$(sent)" 2
+check "normal report excludes crisis incident" "$(grep -c '^Incident report:$' "$work/outbox")" 1
+
+# Crisis email failure must be retried without burning the daily limit.
+echo 2000-01-01 > "$work/state/last_sent"
+mem 32000000 0 0 0 0 0 0 31457280 10485760
+touch "$work/fail"
+"$script" 2>/dev/null; check "failed crisis send exits nonzero" "$?" 1
+check "failed crisis send not recorded" "$(cat "$work/state/last_sent")" 2000-01-01
+rm "$work/fail"
+"$script"; check "crisis retry sends once" "$(sent)" 3
+
+# Entire report uses only aggregate RAM/swap statistics, not running apps.
+check "no application names in emergency report" "$(grep -Eic 'Zenith|Blender|Firefox|Chrome|systemd|Discord' "$work/outbox" || true)" 0
 
 # Config errors.
 RAM_ALTMAN_TO='' "$script" 2>/dev/null; check "missing recipient refused" "$?" 1

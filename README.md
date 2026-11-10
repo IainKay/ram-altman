@@ -27,11 +27,12 @@ So we wrote a script. If your machine has more than 10% of its RAM available, it
 ## Features
 
 - Tracks total, used and available RAM, plus your standing with the global allocation authorities
+- Reports **Memory Humanitarian Crisis Mode** when RAM is below 1% available and swap usage exceeds 10 GiB, without inspecting running applications
 - Handles page cache correctly, which already puts it ahead of most arguments about RAM
 - Sends at most one email per day, because we're hoarders, not animals
 - Rotates 8 subject lines, 10 messages and 6 sign-offs, so the joke gets old at a carefully managed pace
 - Logs every sample to CSV for when the auditors arrive
-- Ships with 14 tests, more than the DRAM market has had sensible outcomes
+- Ships with 32 tests, more than the DRAM market has had sensible outcomes
 - Is written in bash, as an Electron version would have solved the problem by using all the RAM
 
 ## A sample of today's correspondence
@@ -54,6 +55,44 @@ Reply if you'd like it to stop.
 ```
 
 The figures are real. They come from your machine. That's the worrying part.
+
+## When even swap is begging for mercy
+
+Usually, RAM-Altman only reports *spare* RAM. It now also handles the opposite case:
+**less than 1% of physical RAM available and more than 10 GiB of swap in use**.
+Both conditions are required; the comparison is strict.
+
+A crisis report uses only `/proc/meminfo` (physical RAM and `SwapTotal - SwapFree`).
+It doesn't inspect running processes, collect application names, or report anything
+other than aggregate memory figures. There is no third email: normal and crisis
+reports share the same **one successful email per day** limit. Failed sends may be
+retried, and `--dry-run` never sends mail or changes the rotation state.
+
+For example, a simulated machine might produce:
+
+```text
+Subject: URGENT: The RAM has fallen. Swap is our last line of defense.
+
+Hi Sam,
+
+This is a formal request to suspend the investigation into idle RAM.
+The memory was located, allocated, and then some.
+Swap is currently handling the overflow with admirable restraint.
+
+Incident report:
+  Total RAM:      30.5 GiB
+  RAM available:  0.0 GiB (0.0%)
+  Swap used:      20.0 GiB / 30.0 GiB
+
+With no memory to spare,
+A concerned RAM owner
+```
+
+The example is illustrative; the script randomly selects from five crisis
+subjects, six crisis bodies and four crisis sign-offs. The same sender/recipient
+setup and `--dry-run` command work for both report types. When there is no swap
+or swap usage is 10 GiB or less, the existing silence below the normal threshold
+remains unchanged.
 
 ## What counts as "used"?
 
