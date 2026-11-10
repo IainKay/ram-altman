@@ -1,0 +1,912 @@
+; ram-altman.wsa - the source of ram-altman.ws.
+;
+; Rebuild with:  awk -f ws/assemble.awk ram-altman.wsa > ram-altman.ws
+;
+; Whitespace can read stdin and write stdout, and that's it. ram-altman.sh
+; does the chores it can't (files, the clock, dice, sendmail) and feeds this
+; program one value per line:
+;
+;   mode            1 = --status, 2 = --dry-run, 3 = a normal run
+;   threshold       email when available RAM is above this percentage
+;   today           YYYYMMDD
+;   last sent       YYYYMMDD of the last email, 0 if none
+;   seed            a random number
+;   then for subject, body and signoff:
+;     bag           the indexes still to deal, as digits ("5317"), may be empty
+;     last          the index dealt last time, -1 if none
+;   sender name, sender address, recipient, Date header
+;   /proc/meminfo, followed by a line "EOF: 0"
+;
+; In mode 3 it answers with:
+;
+;   LOG total_kb,used_kb,available_kb,available_pct
+;   DONE                                  nothing to send, or:
+;   BAG <list> <last> <bag>               one per template list, to save
+;   MAIL                                  and then the full message
+;
+; A line starting with ! is an error.
+;
+; How "used" is worked out:
+;   used = MemTotal - MemAvailable
+;
+;   MemAvailable is the kernel's own estimate of how much memory can be handed
+;   to new programs without swapping. It covers free memory plus the page cache
+;   and slab memory that can be reclaimed, so cached RAM does not count as used.
+;   It leaves out what can't really be reclaimed, such as tmpfs/shared memory,
+;   which makes it more accurate than simply adding "free" and "cached" together.
+
+; Heap: variables live at 1-999, strings (length, then characters) above.
+.equ BAG_SUBJECT 1000
+.equ BAG_BODY 1100
+.equ BAG_SIGNOFF 1200
+.equ STR_NAME 2000
+.equ STR_FROM 3000
+.equ STR_TO 4000
+.equ STR_DATE 5000
+.equ KIB_PER_GIB 1048576
+
+; ----- Start ------------------------------------------------------------------
+    addr mode
+    readn
+    addr threshold
+    readn
+    addr today
+    readn
+    addr last_sent
+    readn
+    addr seed
+    readn
+    call seed_rng
+
+    push BAG_SUBJECT
+    call read_line
+    addr last_subject
+    readn
+    push BAG_BODY
+    call read_line
+    addr last_body
+    readn
+    push BAG_SIGNOFF
+    call read_line
+    addr last_signoff
+    readn
+
+    push STR_NAME
+    call read_line
+    push STR_FROM
+    call read_line
+    push STR_TO
+    call read_line
+    push STR_DATE
+    call read_line
+
+    call read_meminfo
+    call work_out_memory
+
+    ld mode
+    push 1
+    sub
+    jz mode_status
+    ld mode
+    push 2
+    sub
+    jz mode_dry_run
+    jmp mode_run
+
+mode_status:
+    call print_status
+    end
+
+mode_dry_run:
+    push 1
+    st dry_run
+    call print_status
+    call is_over_threshold
+    jz dry_run_quiet
+    call compose_email
+    say "\n"
+    call render_message
+    end
+dry_run_quiet:
+    say "No email: available RAM is not above "
+    ld threshold
+    outn
+    say "%.\n"
+    end
+
+mode_run:
+    push 0
+    st dry_run
+    say "LOG "
+    ld total
+    outn
+    say ","
+    ld used
+    outn
+    say ","
+    ld available
+    outn
+    say ","
+    call put_pct
+    say "\n"
+    call is_over_threshold
+    jz run_done
+    ; At most one email a day.
+    ld today
+    ld last_sent
+    sub
+    jz run_done
+    call compose_email
+    say "MAIL\n"
+    call render_message
+    end
+run_done:
+    say "DONE\n"
+    end
+
+no_total:
+    say "!could not find MemTotal\n"
+    end
+
+; ----- Input ------------------------------------------------------------------
+
+; [base] -> []. Reads one line into the string at base.
+read_line:
+    st rl_base
+    push 0
+    st rl_len
+rl_next:
+    addr ch
+    readc
+    ld ch
+    jn rl_done
+    ld ch
+    push 10
+    sub
+    jz rl_done
+    ld rl_base
+    ld rl_len
+    add
+    push 1
+    add
+    ld ch
+    store
+    ld rl_len
+    push 1
+    add
+    st rl_len
+    jmp rl_next
+rl_done:
+    ld rl_base
+    ld rl_len
+    store
+    ret
+
+; Reads "Key:   12345 kB" lines until "EOF:". Each key is hashed as it is read,
+; so "SwapCached" can't be mistaken for "Cached".
+read_meminfo:
+    push 0
+    st total
+    push 0
+    st free
+    push 0
+    st available
+    push 0
+    st has_available
+    push 0
+    st buffers
+    push 0
+    st cached
+    push 0
+    st slab
+    push 0
+    st shmem
+rm_line:
+    push 0
+    st key
+rm_key:
+    addr ch
+    readc
+    ld ch
+    jn rm_end
+    ld ch
+    push ':'
+    sub
+    jz rm_colon
+    ld ch
+    push 10
+    sub
+    jz rm_line
+    ld key
+    push 131
+    mul
+    ld ch
+    add
+    push 1000000007
+    mod
+    st key
+    jmp rm_key
+rm_colon:
+    ld key
+    pushh "EOF"
+    sub
+    jz rm_end
+    push 0
+    st value
+rm_space:
+    addr ch
+    readc
+    ld ch
+    push ' '
+    sub
+    jz rm_space
+    ld ch
+    push 9
+    sub
+    jz rm_space
+rm_digit:
+    ld ch
+    push '0'
+    sub
+    jn rm_rest
+    push '9'
+    ld ch
+    sub
+    jn rm_rest
+    ld value
+    push 10
+    mul
+    ld ch
+    add
+    push '0'
+    sub
+    st value
+    addr ch
+    readc
+    jmp rm_digit
+rm_rest:
+    ld ch
+    push 10
+    sub
+    jz rm_keep
+    ld ch
+    jn rm_keep
+    addr ch
+    readc
+    jmp rm_rest
+rm_keep:
+    call keep_value
+    jmp rm_line
+rm_end:
+    ret
+
+keep_value:
+    ld key
+    pushh "MemTotal"
+    sub
+    jz kv_total
+    ld key
+    pushh "MemFree"
+    sub
+    jz kv_free
+    ld key
+    pushh "MemAvailable"
+    sub
+    jz kv_available
+    ld key
+    pushh "Buffers"
+    sub
+    jz kv_buffers
+    ld key
+    pushh "Cached"
+    sub
+    jz kv_cached
+    ld key
+    pushh "SReclaimable"
+    sub
+    jz kv_slab
+    ld key
+    pushh "Shmem"
+    sub
+    jz kv_shmem
+    ret
+kv_total:
+    ld value
+    st total
+    ret
+kv_free:
+    ld value
+    st free
+    ret
+kv_available:
+    ld value
+    st available
+    push 1
+    st has_available
+    ret
+kv_buffers:
+    ld value
+    st buffers
+    ret
+kv_cached:
+    ld value
+    st cached
+    ret
+kv_slab:
+    ld value
+    st slab
+    ret
+kv_shmem:
+    ld value
+    st shmem
+    ret
+
+; ----- Memory -----------------------------------------------------------------
+
+; Sets cache, available, used and pct10 (available %, in tenths).
+work_out_memory:
+    ld buffers
+    ld cached
+    add
+    ld slab
+    add
+    ld shmem
+    sub
+    st cache
+    ld cache
+    jn wm_no_cache
+    jmp wm_estimate
+wm_no_cache:
+    push 0
+    st cache
+wm_estimate:
+    ; Kernels older than 3.14 have no MemAvailable, so estimate it.
+    ld has_available
+    jz wm_add_up
+    jmp wm_cap
+wm_add_up:
+    ld free
+    ld cache
+    add
+    st available
+wm_cap:
+    ld total
+    ld available
+    sub
+    jn wm_too_much
+    jmp wm_total
+wm_too_much:
+    ld total
+    st available
+wm_total:
+    ; With no MemTotal the error ends the program right here.
+    ld total
+    jz no_total
+    ld total
+    jn no_total
+    ld total
+    ld available
+    sub
+    st used
+    ld available
+    push 1000
+    mul
+    ld total
+    call round_div
+    st pct10
+    ret
+
+; [] -> [1 or 0]. Over if available * 100 > threshold * total.
+is_over_threshold:
+    ld threshold
+    ld total
+    mul
+    ld available
+    push 100
+    mul
+    sub
+    jn over
+    push 0
+    ret
+over:
+    push 1
+    ret
+
+; [x d] -> [x / d], rounded to the nearest whole number, ties to even, which is
+; what printf's %.1f does.
+round_div:
+    st rd_d
+    st rd_x
+    ld rd_x
+    ld rd_d
+    div
+    st rd_q
+    ld rd_x
+    ld rd_d
+    mod
+    push 2
+    mul
+    ld rd_d
+    sub
+    st rd_t
+    ld rd_t
+    jz rd_tie
+    ld rd_t
+    jn rd_down
+rd_up:
+    ld rd_q
+    push 1
+    add
+    ret
+rd_tie:
+    ld rd_q
+    push 2
+    mod
+    jz rd_down
+    jmp rd_up
+rd_down:
+    ld rd_q
+    ret
+
+; ----- Printing ---------------------------------------------------------------
+
+; [tenths] -> []. Prints 562 as 56.2.
+put_tenths:
+    st pt_n
+    ld pt_n
+    push 10
+    div
+    outn
+    push '.'
+    outc
+    ld pt_n
+    push 10
+    mod
+    outn
+    ret
+
+; [kb] -> []. Prints kB as GiB, to one decimal place.
+put_gib:
+    push 10
+    mul
+    push KIB_PER_GIB
+    call round_div
+    call put_tenths
+    say " GiB"
+    ret
+
+put_total:
+    ld total
+    jmp put_gib
+put_used:
+    ld used
+    jmp put_gib
+put_available:
+    ld available
+    jmp put_gib
+put_free:
+    ld free
+    jmp put_gib
+put_cache:
+    ld cache
+    jmp put_gib
+put_pct:
+    ld pct10
+    jmp put_tenths
+
+put_name:
+    push STR_NAME
+    retrieve
+    jz pn_anonymous
+    push STR_NAME
+    jmp put_string
+pn_anonymous:
+    say "A concerned RAM owner"
+    ret
+
+; [base] -> []
+put_string:
+    st ps_base
+    push 0
+    st ps_i
+ps_next:
+    ld ps_i
+    ld ps_base
+    retrieve
+    sub
+    jz ps_done
+    ld ps_base
+    ld ps_i
+    add
+    push 1
+    add
+    retrieve
+    outc
+    ld ps_i
+    push 1
+    add
+    st ps_i
+    jmp ps_next
+ps_done:
+    ret
+
+print_status:
+    say "Total:      {total}\n"
+    say "Used:       {used}\n"
+    say "Available:  {available} ({pct}%)\n"
+    say "  Free:     {free}\n"
+    say "  Cache:    {cache}\n"
+    ret
+
+; ----- Dealing ----------------------------------------------------------------
+
+; MINSTD. Small enough that every step stays exact in a double.
+seed_rng:
+    ld seed
+    push 2147483646
+    mod
+    push 1
+    add
+    st rng
+    ret
+
+; [] -> [a random number]
+random:
+    ld rng
+    push 48271
+    mul
+    push 2147483647
+    mod
+    dup
+    st rng
+    ret
+
+; [count base last_addr] -> [index]
+; Deals out every option once, in random order, before any can come up again.
+; A dry run leaves the bag alone.
+pick:
+    st pk_last
+    st pk_base
+    st pk_count
+    ld dry_run
+    jz pk_from_bag
+    call random
+    ld pk_count
+    mod
+    ret
+pk_from_bag:
+    ld pk_base
+    retrieve
+    jz pk_deal
+    jmp pk_take
+pk_deal:
+    ; Fill the bag with the digits 0 to count-1...
+    push 0
+    st pk_i
+pk_fill:
+    ld pk_i
+    ld pk_count
+    sub
+    jz pk_shuffle
+    ld pk_base
+    ld pk_i
+    add
+    push 1
+    add
+    ld pk_i
+    push '0'
+    add
+    store
+    ld pk_i
+    push 1
+    add
+    st pk_i
+    jmp pk_fill
+pk_shuffle:
+    ld pk_base
+    ld pk_count
+    store
+    ; ...and shuffle it (Fisher-Yates).
+    ld pk_count
+    push 1
+    sub
+    st pk_i
+pk_swap:
+    ld pk_i
+    jz pk_no_repeat
+    call random
+    ld pk_i
+    push 1
+    add
+    mod
+    st pk_j
+    ld pk_base
+    ld pk_i
+    add
+    push 1
+    add
+    st pk_at_i
+    ld pk_base
+    ld pk_j
+    add
+    push 1
+    add
+    st pk_at_j
+    ld pk_at_i
+    retrieve
+    st pk_held
+    ld pk_at_i
+    ld pk_at_j
+    retrieve
+    store
+    ld pk_at_j
+    ld pk_held
+    store
+    ld pk_i
+    push 1
+    sub
+    st pk_i
+    jmp pk_swap
+pk_no_repeat:
+    ; Stop the last pick of the old round opening the new one.
+    ld pk_count
+    push 1
+    sub
+    jz pk_take
+    ld pk_base
+    push 1
+    add
+    retrieve
+    push '0'
+    sub
+    ld pk_last
+    retrieve
+    sub
+    jz pk_rotate
+    jmp pk_take
+pk_rotate:
+    ld pk_base
+    call shift
+    st pk_held
+    ld pk_base
+    ld pk_base
+    retrieve
+    add
+    push 1
+    add
+    ld pk_held
+    store
+    ld pk_base
+    ld pk_base
+    retrieve
+    push 1
+    add
+    store
+pk_take:
+    ld pk_base
+    call shift
+    push '0'
+    sub
+    st pk_next
+    ld pk_last
+    ld pk_next
+    store
+    ; Covers the template lists being shortened after the bag was dealt.
+    ld pk_next
+    jn pk_reroll
+    ld pk_next
+    ld pk_count
+    sub
+    jn pk_done
+pk_reroll:
+    call random
+    ld pk_count
+    mod
+    st pk_next
+pk_done:
+    ld pk_next
+    ret
+
+; [base] -> [first character]. Removes the first character of a string.
+shift:
+    st sh_base
+    ld sh_base
+    push 1
+    add
+    retrieve
+    st sh_first
+    push 1
+    st sh_i
+sh_next:
+    ld sh_i
+    ld sh_base
+    retrieve
+    sub
+    jz sh_done
+    ld sh_base
+    ld sh_i
+    add
+    ld sh_base
+    ld sh_i
+    add
+    push 1
+    add
+    retrieve
+    store
+    ld sh_i
+    push 1
+    add
+    st sh_i
+    jmp sh_next
+sh_done:
+    ld sh_base
+    ld sh_base
+    retrieve
+    push 1
+    sub
+    store
+    ld sh_first
+    ret
+
+; [base last_addr] -> []. Prints "<last> <bag>".
+put_bag:
+    retrieve
+    outn
+    say " "
+    call put_string
+    say "\n"
+    ret
+
+; ----- The email --------------------------------------------------------------
+
+compose_email:
+    push 8
+    push BAG_SUBJECT
+    addr last_subject
+    call pick
+    st subject_index
+    push 10
+    push BAG_BODY
+    addr last_body
+    call pick
+    st body_index
+    push 6
+    push BAG_SIGNOFF
+    addr last_signoff
+    call pick
+    st signoff_index
+    ld dry_run
+    jz ce_save
+    ret
+ce_save:
+    say "BAG subject "
+    push BAG_SUBJECT
+    addr last_subject
+    call put_bag
+    say "BAG body "
+    push BAG_BODY
+    addr last_body
+    call put_bag
+    say "BAG signoff "
+    push BAG_SIGNOFF
+    addr last_signoff
+    call put_bag
+    ret
+
+render_message:
+    say "From: "
+    push STR_NAME
+    retrieve
+    jz msg_bare_address
+    push STR_NAME
+    call put_string
+    say " <"
+    push STR_FROM
+    call put_string
+    say ">\n"
+    jmp msg_to
+msg_bare_address:
+    push STR_FROM
+    call put_string
+    say "\n"
+msg_to:
+    say "To: "
+    push STR_TO
+    call put_string
+    say "\nSubject: "
+    call put_subject
+    say "\nDate: "
+    push STR_DATE
+    call put_string
+    say "\nMIME-Version: 1.0\n"
+    say "Content-Type: text/plain; charset=UTF-8\n"
+    say "Auto-Submitted: auto-generated\n"
+    say "\nHi Sam,\n\n"
+    call put_body
+    say "\n\n"
+    call put_signoff
+    say "\n{name}\n\n--\n"
+    say "Sent automatically, at most once a day, by a small script on one PC.\n"
+    say "Reply if you'd like it to stop.\n"
+    ret
+
+put_subject:
+    dispatch subject_index subject 8
+subject_0:
+    say "Good news: we found some RAM"
+    ret
+subject_1:
+    say "Unused RAM detected in the wild"
+    ret
+subject_2:
+    say "RAM sighting on my PC"
+    ret
+subject_3:
+    say "{available} of RAM, just sitting there"
+    ret
+subject_4:
+    say "You missed a spot"
+    ret
+subject_5:
+    say "Daily RAM census: some survived"
+    ret
+subject_6:
+    say "{pct}% of my RAM remains at large"
+    ret
+subject_7:
+    say "Still not all of it, I'm afraid"
+    ret
+
+put_body:
+    dispatch body_index body 10
+body_0:
+    say "I'm writing to report that you appear to have missed some. This PC has {total} of RAM and {available} of it ({pct}%) is currently available. I assume this is an oversight."
+    ret
+body_1:
+    say "A routine inspection of my PC found {available} of unclaimed RAM out of {total}. That's {pct}% of the machine doing absolutely nothing. I thought you'd want to know before someone tries to train something on it."
+    ret
+body_2:
+    say "Daily status report:\n\n  Total RAM:     {total}\n  Available:     {available} ({pct}%)\n  Threat level:  someone at OpenAI might notice"
+    ret
+body_3:
+    say "Even with every browser tab I own open, {available} of my {total} of RAM is still available. I'm as surprised as you are."
+    ret
+body_4:
+    say "Please don't be alarmed, but there is {available} of RAM on my desk that isn't in a data centre. That's {pct}% of what's installed here, and as far as I can tell it has no plans today."
+    ret
+body_5:
+    say "Before you ask: yes, I counted the page cache as available. The kernel gives it back the moment anyone asks, which leaves {available} of {total} up for grabs."
+    ret
+body_6:
+    say "Today's forecast for my PC: clear skies, light workloads and {pct}% available memory. Expect {available} of the installed {total} to stay idle through the evening."
+    ret
+body_7:
+    say "I hear RAM is hard to come by these days, so it feels a bit rude to be sitting on {available} of it. Total installed: {total}. It's not for sale, I just like knowing it's there."
+    ret
+body_8:
+    say "I have a confession. I have {available} of RAM that I'm not using, which is {pct}% of the {total} in this PC. I've told nobody but you and a cron job."
+    ret
+body_9:
+    say "If {available} of RAM sits idle in a PC and nobody allocates it, does it still count as capacity? Asking on behalf of the {pct}% of my memory with nothing to do."
+    ret
+
+put_signoff:
+    dispatch signoff_index signoff 6
+signoff_0:
+    say "Yours in abundance,"
+    ret
+signoff_1:
+    say "Regards from the last free RAM in the county,"
+    ret
+signoff_2:
+    say "Hoarding responsibly,"
+    ret
+signoff_3:
+    say "Stay allocated,"
+    ret
+signoff_4:
+    say "Yours, with memory to spare,"
+    ret
+signoff_5:
+    say "Kind regards,"
+    ret

@@ -1,0 +1,2 @@
+# Every byte of the program is whitespace, so keep git's hands off it.
+*.ws binary

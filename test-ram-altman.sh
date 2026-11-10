@@ -82,6 +82,13 @@ check "no back-to-back repeat" "$(uniq -d "$work/bodies" | wc -l)" 0
 # Config errors.
 RAM_ALTMAN_TO='' "$script" 2>/dev/null; check "missing recipient refused" "$?" 1
 
+# The program is built from its source, and is nothing but whitespace.
+here=$(dirname "$script")
+awk -f "$here/ws/assemble.awk" "$here/ram-altman.wsa" | cmp -s - "$here/ram-altman.ws"
+check "ram-altman.ws is up to date with ram-altman.wsa" "$?" 0
+check "ram-altman.ws has no visible characters" \
+    "$(tr -d ' \t\n' < "$here/ram-altman.ws" | wc -c)" 0
+
 echo; echo "$pass passed, $fail failed"
 echo; echo "--- real machine status ---"; RAM_ALTMAN_MEMINFO=/proc/meminfo "$script" --status
 echo; echo "--- sample dry run ---"
