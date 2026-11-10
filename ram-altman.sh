@@ -7,6 +7,7 @@
 #   ram-altman.sh            Log a sample and send the daily email if due
 #   ram-altman.sh --status   Print current memory figures and exit
 #   ram-altman.sh --dry-run  Print the email that would be sent and exit
+#   ram-altman.sh --force    Ignore day limits and low RAM
 #
 # Cron (every 5 minutes):
 #   */5 * * * * /path/to/ram-altman.sh
@@ -224,6 +225,7 @@ send_email() {
 }
 
 main() {
+    local force=false
     case "${1:-}" in
         --status)
             read_memory
@@ -246,15 +248,20 @@ main() {
             exit 0
             ;;
         -h|--help)
-            sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         "")
+            ;;
+        --force)
+            force=true
             ;;
         *)
             die "unknown option: $1 (try --help)"
             ;;
     esac
+
+    echo $force
 
     [[ -n "$RECIPIENT" ]] || die "RECIPIENT is not set"
     [[ -n "$SENDER" ]] || die "SENDER is not set"
@@ -262,7 +269,7 @@ main() {
     mkdir -p "$STATE_DIR"
 
     # Stop overlapping runs from both sending today's email.
-    if command -v flock > /dev/null; then
+    if command -v flock > /dev/null && [[ "$force" != true ]]; then
         exec 9> "$STATE_DIR/lock"
         flock -n 9 || exit 0
     fi
@@ -270,13 +277,16 @@ main() {
     read_memory
     log_sample
 
+    if [[ "$force" != true ]]; then
     is_over_threshold || exit 0
+    fi
 
     local today last_sent
     today=$(date +%F)
     last_sent=$(cat "$LAST_SENT_FILE" 2>/dev/null || true)
-    [[ "$last_sent" != "$today" ]] || exit 0
-
+    if [[ "$last_sent" == "$today" && "$force" != true ]]; then
+    exit 0
+    fi
     compose_email
     send_email || die "email failed to send; will try again on the next run"
 
