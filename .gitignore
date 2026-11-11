@@ -1,0 +1,14 @@
+# Local RAM Altman configuration and runtime data
+config.json
+state.json
+memory.csv
+run.lock
+*.log
+
+# PowerShell/editor artefacts
+*.ps1xml
+*.PSScriptAnalyzerSettings.psd1
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
