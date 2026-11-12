@@ -10,6 +10,8 @@ Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no insta
 ![Emails: 1 per day](https://img.shields.io/badge/emails-1%20per%20day-blue)
 ![Written in Bash, not Electron](https://img.shields.io/badge/written%20in-bash%2C%20not%20electron-brightgreen)
 
+![ram-altman — your unused RAM, reported to Sam Altman once a day](https://raw.githubusercontent.com/yasirwhite/opendemo-media/main/IainKay-ram-altman/ram-altman-demo.gif)
+
 There is RAM in your computer. Right now. Just sitting there, in a *personal* computer, being personal.
 
 You may have thought of this as "a computer working normally". On a recent episode of [Cheeky Pint](https://gizmodo.com/sam-altman-youre-completely-right-about-ram-im-sorry-for-the-confusion-heres-what-happened-2000835208), the CEO of OpenAI offered another view:
