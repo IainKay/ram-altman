@@ -1,0 +1,22 @@
+# RAM Altman local configuration and runtime data
+config.json
+state.json
+memory.csv
+run.lock
+
+# Logs
+*.log
+
+# PowerShell temporary/editor files
+*.ps1xml
+*.tmp
+*.bak
+
+# Editors and IDEs
+.vscode/
+.idea/
+
+# Windows/macOS clutter
+Thumbs.db
+Desktop.ini
+.DS_Store
